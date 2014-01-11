@@ -1,0 +1,121 @@
+#!/usr/bin/env escript
+
+-include_lib("kernel/include/file.hrl").
+
+% Figure out whether the specified location is local
+% or remote.
+-spec parse_location(string()) -> {local, unknown, string()} | {remote, atom(), unknown, string()}.
+parse_location(Str) ->
+    case string:tokens(Str, ":") of
+	[Node, Path] ->
+	    {remote, list_to_atom(Node), unknown, Path};
+	[Path] ->
+	    {local, unknown, Path}
+    end.
+
+usage() ->
+    io:format("erlcp <source> <destination>~n~n"),
+    io:format("Specify local locations using their paths.~n"),
+    io:format("Specify remote locations in the form name@node:path.~n").
+
+parse_args(Args) ->
+    Locations = [parse_location(X) || X <- Args],
+    {Sources, [Destination]} = lists:split(length(Locations) - 1, Locations),
+    case Sources of
+	[] ->
+	    error("Need to specify at least one source file.~n");
+	_ ->
+	    {Sources, Destination}
+    end.
+
+-spec setup_local_node(atom(), atom()) -> ok.
+setup_local_node(NodeName, _Cookie) ->
+    % First, make sure that Epmd is running
+    case net_adm:names() of
+	{ok, _} -> %% Epmd is running
+	    ok;
+	{error, address} ->
+	    Epmd = os:find_executable("epmd"),
+	    os:cmd(Epmd ++ " -daemon")
+    end,
+
+    % Next, start up net_kernel
+    case net_kernel:start([NodeName, shortnames]) of
+	{ok, _} ->
+	    case is_alive() of
+		true ->
+		    %erlang:set_cookie(node(), Cookie),
+		    ok;
+		false ->
+		    error("Couldn't set the cookie")
+	    end;
+	{error, Reason} ->
+	    error(io_lib:format("Couldn't start net_kernel? ~p~n", [Reason]))
+    end.
+
+% Categorize all of the languages so that we can do the right thing
+% when copying.
+categorize_location({local,_,Path}) ->
+    case file:read_file_info(Path) of
+	{ok, #file_info{type=Type}} -> {local,Type,Path};
+	{error, _Reason} -> {local,missing,Path}
+    end;
+categorize_location({remote,Node,_,Path}) ->
+    case net_adm:ping(Node) of
+	pang ->
+	    error(io_lib:format("Cannot ping ~p.~n", [Node]));
+	pong ->
+	    ok
+    end,
+    case rpc:call(Node, file, read_file_info, [Path], 1000) of
+	{ok, #file_info{type=Type}} -> {remote,Node,Type,Path};
+	{error, _Reason} -> {remote,Node,missing,Path}
+    end.
+
+copy_files(Sources, Destination) ->
+    lists:foreach(fun(Source) ->
+			  copy_file(Source, Destination) end,
+		  Sources).
+
+copy_file({local,missing,SourcePath}, _) ->
+    error(io_lib:format("'~s' not found or not expected type", [SourcePath]));
+
+copy_file({remote,Node,missing,SourcePath}, _) ->
+    error(io_lib:format("~p:~s not found or not expected type.", [Node, SourcePath]));
+
+copy_file({local,regular,SourcePath}, {local,DestType,DestinationPath})
+  when DestType == regular;DestType == missing ->
+    {ok, _} = file:copy(SourcePath, DestinationPath);
+
+copy_file({local,regular,SourcePath}, {remote,Node,DestType,DestinationPath})
+  when DestType == regular;DestType == missing ->
+    {ok, Contents} = file:read_file(SourcePath),
+    ok = rpc:call(Node, regular, write_file, [DestinationPath, Contents]);
+
+copy_file({local,regular,SourcePath}, {remote,Node,directory,DestinationPath}) ->
+    DestFilename = filename:join(DestinationPath, filename:basename(SourcePath)),
+    copy_file({local,regular,SourcePath}, {remote,Node,regular,DestFilename});
+
+copy_file({remote,Node,regular,SourcePath}, {local,DestType,DestinationPath})
+  when DestType == regular;DestType == missing ->
+    {ok, Contents} = rpc:call(Node, file, read_file, [SourcePath]),
+    ok = file:write_file(DestinationPath, Contents);
+
+copy_file({remote,Node,regular,SourcePath}, {local,directory,DestinationPath}) ->
+    DestFilename = filename:join(DestinationPath, filename:basename(SourcePath)),
+    copy_file({remote,Node,regular,SourcePath}, {local,regular,DestFilename}).
+
+main(Args) ->
+    try
+	{Sources, Destination} = parse_args(Args),
+	setup_local_node(erlcopy_node, getcookiefromargs),
+	CategorizedSources = [categorize_location(Source) || Source <- Sources],
+	CategorizedDestination = categorize_location(Destination),
+	copy_files(CategorizedSources, CategorizedDestination)
+    catch
+	error:Reason when is_list(Reason) ->
+	    io:format("~s~n", [Reason]),
+	    usage();
+	error:OtherReason ->
+	    io:format("Error: ~p~n", [OtherReason])
+    end.
