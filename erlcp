@@ -90,7 +90,7 @@ copy_file({local,regular,SourcePath}, {local,DestType,DestinationPath})
 copy_file({local,regular,SourcePath}, {remote,Node,DestType,DestinationPath})
   when DestType == regular;DestType == missing ->
     {ok, Contents} = file:read_file(SourcePath),
-    ok = rpc:call(Node, regular, write_file, [DestinationPath, Contents]);
+    ok = rpc:call(Node, file, write_file, [DestinationPath, Contents]);
 
 copy_file({local,regular,SourcePath}, {remote,Node,directory,DestinationPath}) ->
     DestFilename = filename:join(DestinationPath, filename:basename(SourcePath)),
