@@ -57,8 +57,8 @@ setup_local_node(NodeName, _Cookie) ->
 % when copying.
 categorize_location({local,_,Path}) ->
     case file:read_file_info(Path) of
-	{ok, #file_info{type=Type}} -> {local,Type,Path};
-	{error, _Reason} -> {local,missing,Path}
+	{ok, #file_info{type=Type,mode=Mode}} -> {local,Type,Path,Mode};
+	{error, _Reason} -> {local,missing,Path,0}
     end;
 categorize_location({remote,Node,_,Path}) ->
     case net_adm:ping(Node) of
@@ -68,8 +68,8 @@ categorize_location({remote,Node,_,Path}) ->
 	    ok
     end,
     case rpc:call(Node, file, read_file_info, [Path], 1000) of
-	{ok, #file_info{type=Type}} -> {remote,Node,Type,Path};
-	{error, _Reason} -> {remote,Node,missing,Path}
+	{ok, #file_info{type=Type,mode=Mode}} -> {remote,Node,Type,Path,Mode};
+	{error, _Reason} -> {remote,Node,missing,Path,0}
     end.
 
 copy_files(Sources, Destination) ->
@@ -77,33 +77,36 @@ copy_files(Sources, Destination) ->
 			  copy_file(Source, Destination) end,
 		  Sources).
 
-copy_file({local,missing,SourcePath}, _) ->
+copy_file({local,missing,SourcePath,_}, _) ->
     error(io_lib:format("'~s' not found or not expected type", [SourcePath]));
 
-copy_file({remote,Node,missing,SourcePath}, _) ->
+copy_file({remote,Node,missing,SourcePath,_}, _) ->
     error(io_lib:format("~p:~s not found or not expected type.", [Node, SourcePath]));
 
-copy_file({local,regular,SourcePath}, {local,DestType,DestinationPath})
+copy_file({local,regular,SourcePath,Mode}, {local,DestType,DestinationPath,_})
   when DestType == regular;DestType == missing ->
-    {ok, _} = file:copy(SourcePath, DestinationPath);
+    {ok, _} = file:copy(SourcePath, DestinationPath),
+    ok = file:change_mode(DestinationPath, Mode);
 
-copy_file({local,regular,SourcePath}, {remote,Node,DestType,DestinationPath})
+copy_file({local,regular,SourcePath,Mode}, {remote,Node,DestType,DestinationPath,_})
   when DestType == regular;DestType == missing ->
     {ok, Contents} = file:read_file(SourcePath),
-    ok = rpc:call(Node, file, write_file, [DestinationPath, Contents]);
+    ok = rpc:call(Node, file, write_file, [DestinationPath, Contents]),
+    ok = rpc:call(Node, file, change_mode, [DestinationPath, Mode]);
 
-copy_file({local,regular,SourcePath}, {remote,Node,directory,DestinationPath}) ->
+copy_file({local,regular,SourcePath,Mode}, {remote,Node,directory,DestinationPath,_}) ->
     DestFilename = filename:join(DestinationPath, filename:basename(SourcePath)),
-    copy_file({local,regular,SourcePath}, {remote,Node,regular,DestFilename});
+    copy_file({local,regular,SourcePath,Mode}, {remote,Node,regular,DestFilename,Mode});
 
-copy_file({remote,Node,regular,SourcePath}, {local,DestType,DestinationPath})
+copy_file({remote,Node,regular,SourcePath,Mode}, {local,DestType,DestinationPath,_})
   when DestType == regular;DestType == missing ->
     {ok, Contents} = rpc:call(Node, file, read_file, [SourcePath]),
-    ok = file:write_file(DestinationPath, Contents);
+    ok = file:write_file(DestinationPath, Contents),
+    ok = file:change_mode(DestinationPath, Mode);
 
-copy_file({remote,Node,regular,SourcePath}, {local,directory,DestinationPath}) ->
+copy_file({remote,Node,regular,SourcePath,Mode}, {local,directory,DestinationPath,_}) ->
     DestFilename = filename:join(DestinationPath, filename:basename(SourcePath)),
-    copy_file({remote,Node,regular,SourcePath}, {local,regular,DestFilename}).
+    copy_file({remote,Node,regular,SourcePath,Mode}, {local,regular,DestFilename,Mode}).
 
 main(Args) ->
     try
